@@ -1026,6 +1026,80 @@
             letter-spacing: 0.1em;
         }
 
+        /* ─── SIDECHAIN KNOB ─── */
+
+        .sidechain-bridge {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 20px 0 8px;
+        }
+
+        .sc-knob-wrap {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .sc-knob {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: radial-gradient(circle at 40% 35%, #1a1a1a, #0a0a0a);
+            border: 2px solid #252525;
+            position: relative;
+            cursor: grab;
+            user-select: none;
+            -webkit-user-select: none;
+            transition: border-color 0.3s, box-shadow 0.3s;
+            transform: rotate(-135deg);
+        }
+
+        .sc-knob:hover {
+            border-color: #333;
+        }
+
+        .sc-knob::after {
+            content: '';
+            position: absolute;
+            top: 5px;
+            left: 50%;
+            width: 2px;
+            height: 10px;
+            background: var(--fg-dim);
+            border-radius: 1px;
+            transform: translateX(-50%);
+            transition: background 0.3s;
+        }
+
+        .sc-knob.active::after {
+            background: var(--accent);
+        }
+
+        .sc-knob.active {
+            border-color: var(--accent);
+        }
+
+        .sc-knob.pumping {
+            box-shadow: 0 0 18px rgba(255, 77, 0, 0.3);
+        }
+
+        .sc-label {
+            font-size: 7px;
+            letter-spacing: 0.2em;
+            color: var(--fg-muted);
+            opacity: 0.6;
+        }
+
+        .sc-value {
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--fg-dim);
+            min-width: 28px;
+            text-align: center;
+        }
+
         /* ─── REELS ─── */
 
         .reels-wrap {
@@ -1802,6 +1876,15 @@
                 <p class="synth-hint">keyboard [ A S D F G H J K ] &middot; sharps [ W E T Y U ] &middot; or tap</p>
             </div>
 
+            <!-- Sidechain Knob -->
+            <div class="sidechain-bridge">
+                <div class="sc-knob-wrap">
+                    <div class="sc-knob" id="sc-knob"></div>
+                    <div class="sc-label">SIDECHAIN</div>
+                    <div class="sc-value" id="sc-value">0%</div>
+                </div>
+            </div>
+
             <!-- Drum Machine -->
             <div class="drum-machine reveal reveal-d3">
                 <div class="drum-header">
@@ -2035,6 +2118,7 @@
 
         let audioCtx = null;
         let analyser = null;
+        let sidechainGain = null;
         const activeOscillators = new Map();
 
         function initAudio() {
@@ -2043,6 +2127,9 @@
             analyser = audioCtx.createAnalyser();
             analyser.fftSize = 2048;
             analyser.smoothingTimeConstant = 0.85;
+            sidechainGain = audioCtx.createGain();
+            sidechainGain.gain.value = 1;
+            sidechainGain.connect(analyser);
             analyser.connect(audioCtx.destination);
         }
 
@@ -2098,7 +2185,7 @@
             g1.connect(filter);
             g2.connect(filter);
             g3.connect(filter);
-            filter.connect(analyser);
+            filter.connect(sidechainGain);
 
             osc1.start(now);
             osc2.start(now);
@@ -2606,6 +2693,11 @@
                     btn.innerHTML = '&#9654;';
                     clearInterval(this.timer);
                     document.querySelectorAll('.seq-cell.current').forEach(c => c.classList.remove('current'));
+                    // Reset sidechain gain
+                    if (sidechainGain && audioCtx) {
+                        sidechainGain.gain.cancelScheduledValues(audioCtx.currentTime);
+                        sidechainGain.gain.setValueAtTime(1, audioCtx.currentTime);
+                    }
                 }
             },
 
@@ -2629,6 +2721,8 @@
                         if (cell) { cell.classList.add('flash'); setTimeout(() => cell.classList.remove('flash'), 100); }
                     }
                 });
+                // Sidechain pump on quarter notes
+                if (this.step % 4 === 0) SIDECHAIN.pump();
                 this.step = (this.step + 1) % 16;
             },
 
@@ -2696,6 +2790,83 @@
         };
 
         DRUMS.init();
+
+        // ─── SIDECHAIN KNOB ───────────────────────────
+
+        const SIDECHAIN = {
+            depth: 0,
+
+            pump() {
+                if (!sidechainGain || !audioCtx || this.depth === 0) return;
+                const now = audioCtx.currentTime;
+                const minGain = 1 - this.depth;
+                const beatDur = 60 / DRUMS.bpm;
+                const release = beatDur * 0.75;
+
+                sidechainGain.gain.cancelScheduledValues(now);
+                sidechainGain.gain.setValueAtTime(sidechainGain.gain.value, now);
+                sidechainGain.gain.linearRampToValueAtTime(minGain, now + 0.005);
+                sidechainGain.gain.linearRampToValueAtTime(1, now + 0.005 + release);
+
+                // Visual pulse
+                const knobEl = document.getElementById('sc-knob');
+                knobEl.classList.add('pumping');
+                setTimeout(() => knobEl.classList.remove('pumping'), 80);
+            }
+        };
+
+        (function initSidechainKnob() {
+            const knobEl = document.getElementById('sc-knob');
+            const valEl = document.getElementById('sc-value');
+            let dragging = false;
+            let startY = 0;
+            let startVal = 0;
+
+            function updateKnob() {
+                const angle = -135 + SIDECHAIN.depth * 270;
+                knobEl.style.transform = 'rotate(' + angle + 'deg)';
+                valEl.textContent = Math.round(SIDECHAIN.depth * 100) + '%';
+                knobEl.classList.toggle('active', SIDECHAIN.depth > 0);
+            }
+
+            knobEl.addEventListener('mousedown', (e) => {
+                dragging = true;
+                startY = e.clientY;
+                startVal = SIDECHAIN.depth;
+                knobEl.style.cursor = 'grabbing';
+                e.preventDefault();
+            });
+
+            window.addEventListener('mousemove', (e) => {
+                if (!dragging) return;
+                const dy = startY - e.clientY;
+                SIDECHAIN.depth = Math.max(0, Math.min(1, startVal + dy / 120));
+                updateKnob();
+            });
+
+            window.addEventListener('mouseup', () => {
+                if (dragging) { dragging = false; knobEl.style.cursor = ''; }
+            });
+
+            // Touch support
+            knobEl.addEventListener('touchstart', (e) => {
+                dragging = true;
+                startY = e.touches[0].clientY;
+                startVal = SIDECHAIN.depth;
+                e.preventDefault();
+            }, { passive: false });
+
+            window.addEventListener('touchmove', (e) => {
+                if (!dragging) return;
+                const dy = startY - e.touches[0].clientY;
+                SIDECHAIN.depth = Math.max(0, Math.min(1, startVal + dy / 120));
+                updateKnob();
+            });
+
+            window.addEventListener('touchend', () => { dragging = false; });
+
+            updateKnob();
+        })();
 
         // ─── LANGUAGE EXPLORER ──────────────────────────
 
